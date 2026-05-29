@@ -26,36 +26,55 @@ pip install -r requirements.txt
 Expected CLI:
 
 ```bash
-python -m src.main --input data/raw/apache/access.log --server-type apache --output-dir outputs/apache_run
+python -m src.main --input data/raw/apache/access.log
 ```
 
 With explicit rules file:
 
 ```bash
-python -m src.main --input input/Apache/access1.log --server-type apache --output-dir outputs/apache_run --rules data/labels/attack_patterns.yaml
 ```
 
 ## Required Arguments
 
 - `--input`: path to one access log file
-- `--server-type`: `apache`, `nginx`, or `iis`
-- `--output-dir`: output directory for one run
-- `--rules` (optional): YAML rule file path (default: `data/labels/attack_patterns.yaml`)
+- `--server-type` (optional): `apache`, `nginx`, or `iis` (if omitted, pipeline auto-detects)
+- `--output-dir` (optional): output directory for one run (default: `outputs`)
+- `--rules` (optional): YAML rule file path (default: `src/rules/attack_patterns.yaml`)
+- `--stage` (optional): `all` (default) or one stage: `collect`, `parser`, `normalize`, `preprocess`, `detect`, `extract`
 
 ## Output Files
 
-One run writes these artifacts into `--output-dir`:
+One full run writes artifacts into module folders under `--output-dir`:
 
-- `raw_lines.jsonl`
-- `parsed_logs.jsonl`
-- `normalized_logs.jsonl`
-- `normalized_logs.csv`
-- `preprocessed_requests.jsonl`
-- `features.csv`
-- `alerts.jsonl`
-- `alerts.csv`
-- `report.md`
-- `run_summary.json`
+- `collector_results/<server>_<input_stem>_raw_lines.jsonl`
+- `parser_results/<server>_<input_stem>_parsed_logs.jsonl`
+- `normalizer_results/<server>_<input_stem>_normalized_logs.jsonl`
+- `normalizer_results/<server>_<input_stem>_normalized_logs.csv`
+- `preprocessor_results/<server>_<input_stem>_preprocessed_requests.jsonl`
+- `feature_results/<server>_<input_stem>_features.csv`
+- `detector_results/<server>_<input_stem>_alerts.jsonl`
+- `detector_results/<server>_<input_stem>_alerts.csv`
+- `<server>_<input_stem>_report.md`
+- `<server>_<input_stem>_run_summary.json`
+
+## Convert Diverse Inputs
+
+Convert `.txt`, `.csv`, `.json`, `.jsonl` into canonical JSONL records for pipeline ingestion prep:
+
+```bash
+python convert.py --input <input_file>
+```
+
+Optional split by file size (MB), for large inputs:
+
+```bash
+python convert.py --input <input_file> --max-file-size-mb 500
+```
+
+Conversion output folders:
+
+- `data/collected/converted_<input_stem>.jsonl` (or `_partNNN.jsonl` when split)
+- `data/parsered/converted_<input_stem>.jsonl` (or `_partNNN.jsonl` when split)
 
 ## Tests
 

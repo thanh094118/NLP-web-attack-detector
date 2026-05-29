@@ -2,15 +2,15 @@
 
 ## Repository Status
 
-This project is currently in **Phase 1**: a **non-ML MVP pipeline** for web access log parsing and rule-based web attack detection.
+This project is in **Phase 1**: a **non-ML MVP pipeline** for web access log parsing and rule-based web attack detection.
 
-Important status:
-- Phase 1 baseline is already implemented end-to-end.
-- Preserve the current **package-based architecture**.
-- Do **not** rebuild from scratch.
-- Do **not** start Phase 2 ML unless the user explicitly requests it.
+Current baseline status:
+- Phase 1 pipeline is implemented end-to-end.
+- Package-based architecture is the accepted convention and must be preserved.
+- Do not rebuild from scratch.
+- Do not start Phase 2 ML unless explicitly requested.
 
-Phase 2 ML is intentionally deferred. Do not add TF-IDF, n-gram ML, embeddings, vector search, deep learning, Isolation Forest, or realtime ML inference in Phase 1 tasks.
+Phase 2 ML remains deferred. Do not add TF-IDF, n-gram ML, embeddings, vector search, deep learning, Isolation Forest, or realtime ML inference in Phase 1 tasks.
 
 ## Entrypoints
 
@@ -22,8 +22,8 @@ Compatibility wrapper:
 
 ## Architecture (Preserve)
 
-Current accepted package structure:
-- `src/main.py` (pipeline orchestration CLI)
+Keep current package layout:
+- `src/main.py`
 - `src/collector/`
 - `src/parser/`
 - `src/normalizer/`
@@ -34,16 +34,16 @@ Current accepted package structure:
 - `src/exporters/`
 - `src/reporting/`
 
-Do not revert to single-file legacy layout.
-Do not recreate old modules such as:
+Do not revert to single-file legacy modules.
+Do not recreate:
 - `src/parser.py`
 - `src/scoring.py`
 - `src/exporter.py`
 - `src/report.py`
 
-## Current Pipeline Outputs
+## Pipeline Outputs
 
-Per run, the pipeline should generate:
+Per run, expected artifacts:
 - `raw_lines.jsonl`
 - `parsed_logs.jsonl`
 - `normalized_logs.jsonl`
@@ -55,32 +55,40 @@ Per run, the pipeline should generate:
 - `report.md`
 - `run_summary.json`
 
+Collector-related optional metadata fields (raw stage):
+- `encoding_used`
+- `decode_error`
+- `had_bom`
+- `was_continuation_merged`
+- `physical_line_start`
+- `physical_line_end`
+
 ## Data/Schema Invariants
 
-When modifying code, preserve these behaviors:
-- Malformed log lines are preserved as records, not dropped.
-- Keep `raw_log` and original URL field (`original_url` / equivalent).
-- Keep `parse_status`, `parse_error`, and `error_message` where applicable.
-- Keep output schemas stable across artifacts.
-- Preserve `event_id` (or equivalent stable identifier) across pipeline artifacts when possible.
+- Malformed logs are first-class records; do not silently drop them.
+- Preserve `raw_log` and original URL field (`original_url` or equivalent).
+- Preserve parse status/error fields where applicable.
+- Keep output schemas stable; add optional fields conservatively.
+- Preserve `event_id` (or equivalent stable identifier) across artifacts when possible.
+
+## Collector Rules
+
+- Continuation merge is intentionally conservative: merge only when continuation line starts with space/tab.
+- Do not reintroduce broad heuristics that may merge valid record starts (hostname, IPv6-mapped forms, `-` prefixes, custom textual starts).
 
 ## Workflow Rules
 
-Before changing code:
+Before code changes:
 - Read `AGENTS.md`.
-- Read relevant `conversation_cache/*` files, at minimum:
-  - `conversation_cache/current_status.md`
-  - `conversation_cache/known_issues.md`
-  - `conversation_cache/edge_cases.md`
-  - `conversation_cache/datasets.md`
+- Read relevant `conversation_cache/*` (at minimum: `current_status.md`, `known_issues.md`, `edge_cases.md`, `datasets.md`).
 
-After changing code:
+After code changes:
 - Update `conversation_cache/current_status.md`.
 - Update relevant cache files (`decisions.md`, `todo.md`, `known_issues.md`, `edge_cases.md`, `datasets.md`) when affected.
 
 Engineering style:
 - Prefer small, focused changes.
-- Add or update tests with functional changes.
+- Add/update tests for functional behavior changes.
 - Run `pytest` after code changes.
 
 ## Commands
@@ -95,7 +103,7 @@ Tests:
 
 ## Git Hygiene
 
-Do not commit generated/local artifacts, including:
+Do not commit generated/local artifacts:
 - `outputs/`
 - `data/processed/`
 - `__pycache__/`

@@ -1,3 +1,13 @@
+# Core pipeline
 pyyaml
 python-dateutil
+gdown
+
+# Test runner
 pytest
+
+# Optional/isolated AI test pipeline dependencies (test_pipeline/)
+joblib
+numpy
+pandas
+scikit-learn
