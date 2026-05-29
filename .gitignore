@@ -17,3 +17,6 @@ __pycache__/
 *.codex
 **/.agents
 *.agents
+# Large/local artifacts
+outputs.zip
+outputs/
