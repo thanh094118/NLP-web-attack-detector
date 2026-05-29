@@ -13,87 +13,130 @@ _REQUEST_LINE_PATTERN = re.compile(r"^(?P<method>[A-Z]{2,16})\s+(?P<target>\S.*?
 _START_BLOCK_PATTERN = re.compile(r"^Start\s*-\s*Id\s*:\s*.+$", re.IGNORECASE)
 _END_BLOCK_PATTERN = re.compile(r"^End\s*-\s*Id\s*:\s*.+$", re.IGNORECASE)
 
-_URI_KEYS = ("raw_uri", "original_url", "uri", "url", "uri_path", "path", "request_uri", "cs_uri_stem")
+MAX_PART_BYTES = 50 * 1024 * 1024
+
+_URI_KEYS = ("raw_uri", "original_url", "uri", "url", "uri_path", "path", "request_uri", "cs_uri_stem", "request_http_request")
 _QUERY_KEYS = ("query_string", "query", "cs_uri_query")
-_METHOD_KEYS = ("http_method", "method", "verb", "cs_method")
-_STATUS_KEYS = ("status_code", "status", "http_status", "response_status", "sc_status")
+_METHOD_KEYS = ("http_method", "method", "verb", "cs_method", "request_http_method")
+_STATUS_KEYS = ("status_code", "status", "http_status", "response_status", "sc_status", "response_http_status_code")
 _SIZE_KEYS = ("response_size", "bytes", "size", "content_length", "response_content_length", "sc_bytes")
-_SOURCE_IP_KEYS = ("source_ip", "ip", "client_ip", "remote_addr", "c_ip")
-_UA_KEYS = ("user_agent", "ua", "cs_user_agent")
-_REFERRER_KEYS = ("referrer", "referer", "cs_referer")
-_HTTP_VERSION_KEYS = ("http_version", "protocol", "request_protocol")
-_TIMESTAMP_KEYS = ("timestamp", "time", "date_time", "datetime", "@timestamp", "date")
+_SOURCE_IP_KEYS = ("source_ip", "ip", "client_ip", "remote_addr", "c_ip", "src_ip")
+_UA_KEYS = ("user_agent", "ua", "cs_user_agent", "request_user_agent")
+_REFERRER_KEYS = ("referrer", "referer", "cs_referer", "request_referer")
+_HTTP_VERSION_KEYS = ("http_version", "protocol", "request_protocol", "request_http_protocol")
+_TIMESTAMP_KEYS = ("timestamp", "time", "date_time", "datetime", "@timestamp")
 
 
 def build_cli() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Convert heterogeneous inputs (.txt/.log/.csv/.json/.jsonl) to raw access.log lines"
     )
-    parser.add_argument("--input", required=True, help="Input file path (.txt, .log, .csv, .json, .jsonl)")
-    parser.add_argument(
-        "--output-root",
-        default="data/raw",
-        help="Output root directory for .log files (default: data/raw)",
-    )
-    parser.add_argument(
-        "--server-type",
-        choices=SERVER_TYPE_CHOICES,
-        default=None,
-        help="Optional server_type override for output folder naming",
-    )
+    parser.add_argument("--input", required=True, help="Input file or folder path")
+    parser.add_argument("--output-root", default="data/raw", help="Output root directory for .log files (default: data/raw)")
+    parser.add_argument("--server-type", choices=SERVER_TYPE_CHOICES, default=None, help="Optional server_type override")
     return parser
 
 
 def main() -> None:
     args = build_cli().parse_args()
-    summary = convert_file(
-        input_path=args.input,
-        output_root=args.output_root,
-        server_type=args.server_type,
-    )
+    summary = convert_file(input_path=args.input, output_root=args.output_root, server_type=args.server_type)
 
     print("[+] Conversion finished")
-    print(f"[+] Input file: {summary['input_path']}")
-    print(f"[+] Server type: {summary['server_type']}")
+    print(f"[+] Input: {summary['input_path']}")
+    print(f"[+] Converted files: {summary['counts']['converted_files']}")
+    print(f"[+] Skipped files: {summary['counts']['skipped_files']}")
     print(f"[+] Raw lines: {summary['counts']['raw_lines']}")
-    print(f"[+] Output file: {summary['output']}")
 
 
-def convert_file(
-    *,
-    input_path: str | Path,
-    output_root: str | Path = "data/raw",
-    server_type: Optional[str] = None,
-) -> Dict[str, Any]:
+def convert_file(*, input_path: str | Path, output_root: str | Path = "data/raw", server_type: Optional[str] = None) -> Dict[str, Any]:
     source_path = Path(input_path)
     if not source_path.exists():
-        raise FileNotFoundError(f"Input file not found: {source_path}")
-    if not source_path.is_file():
-        raise ValueError(f"Input path is not a file: {source_path}")
+        raise FileNotFoundError(f"Input path not found: {source_path}")
 
-    items = list(_iter_input_items(source_path))
-    resolved_server_type = server_type or _detect_server_type_from_path(source_path) or "apache"
-    resolved_server_type = resolved_server_type.lower()
+    files = _collect_input_files(source_path)
+    converted: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, str]] = []
 
-    raw_lines: List[str] = []
-    for item in items:
-        for line in _to_raw_log_lines(item):
-            if line.strip():
-                raw_lines.append(line.strip())
-
-    output_root_path = Path(output_root)
-    output_dir = output_root_path / resolved_server_type
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"converted_{source_path.stem}.log"
-    output_path.write_text("\n".join(raw_lines) + ("\n" if raw_lines else ""), encoding="utf-8")
+    for path in files:
+        try:
+            summary = _convert_single_file(path=path, output_root=Path(output_root), server_type=server_type)
+            converted.append(summary)
+        except Exception as exc:
+            skipped.append({"input": str(path), "reason": str(exc)})
 
     return {
         "input_path": str(source_path),
-        "server_type": resolved_server_type,
-        "counts": {"raw_lines": len(raw_lines)},
-        "output": str(output_path),
+        "counts": {
+            "converted_files": len(converted),
+            "skipped_files": len(skipped),
+            "raw_lines": sum(int(item["counts"]["raw_lines"]) for item in converted),
+        },
+        "converted": converted,
+        "skipped": skipped,
+        "output": converted[0]["output"] if len(converted) == 1 else None,
+        "server_type": server_type.lower() if server_type else None,
     }
 
+
+def _collect_input_files(path: Path) -> List[Path]:
+    if path.is_file():
+        return [path]
+    if path.is_dir():
+        out: List[Path] = []
+        for item in sorted(path.rglob("*")):
+            if item.is_file() and item.suffix.lower() in {".txt", ".log", ".csv", ".json", ".jsonl"}:
+                out.append(item)
+        return out
+    raise ValueError(f"Input path is not file/folder: {path}")
+
+
+def _convert_single_file(*, path: Path, output_root: Path, server_type: Optional[str]) -> Dict[str, Any]:
+    resolved_server_type = (server_type or _detect_server_type_from_path(path) or "apache").lower()
+    output_dir = output_root / resolved_server_type
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    items = list(_iter_input_items(path))
+    lines: List[str] = []
+    for item in items:
+        for line in _to_raw_log_lines(item):
+            if line.strip():
+                lines.append(line.strip())
+
+    parts = _chunk_lines_by_bytes(lines, MAX_PART_BYTES)
+    outputs: List[str] = []
+    for idx, chunk in enumerate(parts, start=1):
+        suffix = "" if len(parts) == 1 else f"_part{idx:03d}"
+        out = output_dir / f"converted_{path.stem}{suffix}.log"
+        out.write_text("\n".join(chunk) + ("\n" if chunk else ""), encoding="utf-8")
+        outputs.append(str(out))
+
+    return {
+        "input_path": str(path),
+        "server_type": resolved_server_type,
+        "counts": {"raw_lines": len(lines), "parts": len(parts)},
+        "output": outputs[0] if len(outputs) == 1 else outputs,
+    }
+
+
+def _chunk_lines_by_bytes(lines: List[str], max_bytes: int) -> List[List[str]]:
+    if not lines:
+        return [[]]
+    parts: List[List[str]] = []
+    current: List[str] = []
+    current_bytes = 0
+    for line in lines:
+        lb = len((line + "\n").encode("utf-8"))
+        if current and current_bytes + lb > max_bytes:
+            parts.append(current)
+            current = []
+            current_bytes = 0
+        current.append(line)
+        current_bytes += lb
+    if current:
+        parts.append(current)
+    return parts
+
+# keep existing helper logic
 
 def _iter_input_items(path: Path) -> Iterator[Any]:
     suffix = path.suffix.lower()
@@ -106,94 +149,22 @@ def _iter_input_items(path: Path) -> Iterator[Any]:
     if suffix in {".json", ".jsonl"}:
         yield from _iter_json_rows(path)
         return
-    raise ValueError(f"Unsupported input extension: {suffix}. Supported: .txt, .log, .csv, .json, .jsonl")
+    raise ValueError(f"Unsupported input extension: {suffix}")
 
 
 def _iter_text_entries(path: Path) -> Iterator[str]:
-    mode: Optional[str] = None
-    current_block: List[str] = []
-    is_first_line = True
-
     with path.open("rb") as handle:
         for raw_line in handle:
-            if is_first_line and raw_line.startswith(b"\xef\xbb\xbf"):
-                raw_line = raw_line[3:]
-            is_first_line = False
-
-            try:
-                line = raw_line.decode("utf-8")
-            except UnicodeDecodeError:
-                line = raw_line.decode("latin-1")
-
-            line = line.rstrip("\r\n")
-
-            if mode == "block":
-                if line.strip():
-                    current_block.append(line)
-                if _is_end_block_line(line):
-                    yield "\\n".join(current_block)
-                    current_block = []
-                    mode = None
-                continue
-
-            if mode == "request":
-                if _is_start_block_line(line):
-                    if current_block:
-                        yield "\\n".join(current_block)
-                    current_block = [line]
-                    mode = "block"
-                    continue
-
-                if _is_request_line(line) and current_block:
-                    yield "\\n".join(current_block)
-                    current_block = [line]
-                    mode = "request"
-                    continue
-
-                if not line.strip():
-                    if current_block:
-                        yield "\\n".join(current_block)
-                    current_block = []
-                    mode = None
-                    continue
-
-                current_block.append(line)
-                continue
-
-            if not line.strip():
-                continue
-
-            if _is_start_block_line(line):
-                current_block = [line]
-                mode = "block"
-                continue
-
-            if _is_request_line(line):
-                current_block = [line]
-                mode = "request"
-                continue
-
-            yield line
-
-    if current_block:
-        yield "\\n".join(current_block)
+            line = raw_line.decode("utf-8", errors="ignore").rstrip("\r\n")
+            if line.strip():
+                yield line
 
 
 def _iter_csv_rows(path: Path) -> Iterator[Dict[str, Any]]:
-    errors: List[Exception] = []
-    for encoding in ("utf-8-sig", "latin-1"):
-        try:
-            with path.open("r", encoding=encoding, newline="") as handle:
-                reader = csv.DictReader(handle)
-                if not reader.fieldnames:
-                    return
-                for row in reader:
-                    yield {str(k): v for k, v in row.items()}
-            return
-        except (UnicodeDecodeError, csv.Error) as exc:
-            errors.append(exc)
-    if errors:
-        raise ValueError(f"Cannot parse CSV input: {path}") from errors[-1]
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            yield {str(k): v for k, v in row.items()}
 
 
 def _iter_json_rows(path: Path) -> Iterator[Any]:
@@ -205,95 +176,36 @@ def _iter_json_rows(path: Path) -> Iterator[Any]:
                 if text:
                     yield json.loads(text)
         return
-
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, list):
-        for item in data:
-            yield item
-        return
-
-    if isinstance(data, dict):
-        records = data.get("records")
-        if isinstance(records, list):
-            for item in records:
-                yield item
-            return
+        yield from data
+    else:
         yield data
-        return
-
-    yield {"value": data}
 
 
 def _to_raw_log_lines(item: Any) -> List[str]:
     if isinstance(item, str):
-        return _from_text_item(item)
-
+        return [item]
     if isinstance(item, Mapping):
         return [_from_mapping_item(item)]
-
     return [str(item)]
-
-
-def _from_text_item(text: str) -> List[str]:
-    clean = str(text).strip()
-    if not clean:
-        return []
-
-    if _looks_like_access_log(clean):
-        return [clean]
-
-    block = _parse_http_request_block(clean)
-    if block is not None:
-        return [_build_access_log_line(block)]
-
-    request_line = _extract_request_line(clean)
-    if request_line is not None:
-        method, target, version = _split_request_line(request_line)
-        return [_build_access_log_line({
-            "http_method": method,
-            "raw_uri": target,
-            "http_version": version,
-            "user_agent": "-",
-            "referrer": "-",
-        })]
-
-    return [clean]
 
 
 def _from_mapping_item(item: Mapping[str, Any]) -> str:
     normalized = _normalize_keys(item)
-
-    if "raw_line" in normalized and isinstance(normalized.get("raw_line"), str):
-        raw_line = str(normalized.get("raw_line") or "").strip()
-        if _looks_like_access_log(raw_line):
-            return raw_line
-
-    request_block = _pick_text(normalized, "raw_log", "raw_line", "line", "message")
-    block_parsed = _parse_http_request_block(request_block) if request_block else None
-
-    uri = _pick_text(normalized, *_URI_KEYS)
-    query = _pick_text(normalized, *_QUERY_KEYS)
-    if uri and query and "?" not in uri:
-        uri = f"{uri}?{query}"
-
-    method = _pick_text(normalized, *_METHOD_KEYS)
-    http_version = _pick_text(normalized, *_HTTP_VERSION_KEYS)
-    if not http_version:
-        http_version = "HTTP/1.1"
-
-    payload = {
+    uri = _pick_text(normalized, *_URI_KEYS) or "/"
+    method = _pick_text(normalized, *_METHOD_KEYS) or "GET"
+    return _build_access_log_line({
         "source_ip": _pick_text(normalized, *_SOURCE_IP_KEYS) or "0.0.0.0",
         "timestamp": _pick_text(normalized, *_TIMESTAMP_KEYS),
-        "http_method": method or (block_parsed or {}).get("http_method") or "GET",
-        "raw_uri": uri or (block_parsed or {}).get("raw_uri") or "/",
-        "http_version": http_version or (block_parsed or {}).get("http_version") or "HTTP/1.1",
+        "http_method": method,
+        "raw_uri": uri,
+        "http_version": _pick_text(normalized, *_HTTP_VERSION_KEYS) or "HTTP/1.1",
         "status_code": _pick_int(normalized, *_STATUS_KEYS, default=200),
         "response_size": _pick_int(normalized, *_SIZE_KEYS, default=0),
-        "referrer": _pick_text(normalized, *_REFERRER_KEYS) or (block_parsed or {}).get("referrer") or "-",
-        "user_agent": _pick_text(normalized, *_UA_KEYS) or (block_parsed or {}).get("user_agent") or "-",
-    }
-
-    return _build_access_log_line(payload)
+        "referrer": _pick_text(normalized, *_REFERRER_KEYS) or "-",
+        "user_agent": _pick_text(normalized, *_UA_KEYS) or "-",
+    })
 
 
 def _build_access_log_line(payload: Mapping[str, Any]) -> str:
@@ -306,28 +218,13 @@ def _build_access_log_line(payload: Mapping[str, Any]) -> str:
     response_size = _to_int(payload.get("response_size"), default=0)
     referrer = _escape_quoted(str(payload.get("referrer") or "-"))
     user_agent = _escape_quoted(str(payload.get("user_agent") or "-"))
-
-    request = f"{method} {raw_uri} {http_version}".strip()
-    request = _escape_quoted(request)
-
+    request = _escape_quoted(f"{method} {raw_uri} {http_version}".strip())
     return f'{source_ip} - - [{timestamp}] "{request}" {status_code} {response_size} "{referrer}" "{user_agent}"'
 
 
 def _to_apache_timestamp(value: Any) -> str:
     text = str(value or "").strip()
-    if not text or text == "-":
-        return datetime.now(timezone.utc).strftime("%d/%b/%Y:%H:%M:%S %z")
-
-    formats = (
-        "%d/%b/%Y:%H:%M:%S %z",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%S%z",
-        "%Y-%m-%dT%H:%M:%S.%f%z",
-    )
-    for fmt in formats:
+    for fmt in ("%d/%b/%Y:%H:%M:%S %z", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S"):
         try:
             dt = datetime.strptime(text, fmt)
             if dt.tzinfo is None:
@@ -335,84 +232,11 @@ def _to_apache_timestamp(value: Any) -> str:
             return dt.strftime("%d/%b/%Y:%H:%M:%S %z")
         except ValueError:
             continue
-
     return datetime.now(timezone.utc).strftime("%d/%b/%Y:%H:%M:%S %z")
 
 
 def _escape_quoted(value: str) -> str:
     return value.replace('"', '\\"')
-
-
-def _looks_like_access_log(text: str) -> bool:
-    return bool(re.match(r'^\S+\s+\S+\s+\S+\s+\[[^\]]+\]\s+".*"\s+\d{3}\s+\S+', text))
-
-
-def _parse_http_request_block(raw_block: str) -> Optional[Dict[str, Any]]:
-    request_line = _extract_request_line(raw_block)
-    if not request_line:
-        return None
-
-    method, target, version = _split_request_line(request_line)
-    headers = _extract_headers(raw_block, request_line)
-
-    return {
-        "http_method": method,
-        "raw_uri": target,
-        "http_version": version,
-        "user_agent": headers.get("user-agent") or "-",
-        "referrer": headers.get("referer") or headers.get("referrer") or "-",
-        "source_ip": headers.get("x-forwarded-for") or "0.0.0.0",
-        "status_code": 200,
-        "response_size": 0,
-    }
-
-
-def _extract_headers(raw_block: str, request_line: str) -> Dict[str, str]:
-    headers: Dict[str, str] = {}
-    request_seen = False
-    for line in str(raw_block).split("\\n"):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if not request_seen:
-            if stripped == request_line:
-                request_seen = True
-            continue
-        if ":" not in stripped:
-            continue
-        key, value = stripped.split(":", 1)
-        headers[key.strip().lower()] = value.strip()
-    return headers
-
-
-def _extract_request_line(value: str) -> Optional[str]:
-    for line in str(value).split("\\n"):
-        candidate = line.strip()
-        if _is_request_line(candidate):
-            return candidate
-    return None
-
-
-def _split_request_line(request_line: str) -> tuple[str, str, str]:
-    match = _REQUEST_LINE_PATTERN.match(request_line.strip())
-    if not match:
-        return "GET", "/", "HTTP/1.1"
-    method = match.group("method")
-    target = match.group("target")
-    version = match.group("version") or "HTTP/1.1"
-    return method, target, version
-
-
-def _is_start_block_line(line: str) -> bool:
-    return bool(_START_BLOCK_PATTERN.match(line.strip()))
-
-
-def _is_end_block_line(line: str) -> bool:
-    return bool(_END_BLOCK_PATTERN.match(line.strip()))
-
-
-def _is_request_line(line: str) -> bool:
-    return bool(_REQUEST_LINE_PATTERN.match(line.strip()))
 
 
 def _detect_server_type_from_path(input_path: Path) -> Optional[str]:
@@ -424,42 +248,28 @@ def _detect_server_type_from_path(input_path: Path) -> Optional[str]:
 
 
 def _normalize_keys(record: Mapping[str, Any]) -> Dict[str, Any]:
-    normalized: Dict[str, Any] = {}
+    out: Dict[str, Any] = {}
     for key, value in record.items():
         text = str(key).strip().strip('"').strip("'").lower()
         text = text.replace("-", "_").replace(" ", "_")
-        text = text.replace("(", "_").replace(")", "")
-        while "__" in text:
-            text = text.replace("__", "_")
-        normalized[text] = value
-    return normalized
+        out[text] = value
+    return out
 
 
 def _pick_value(record: Mapping[str, Any], *keys: str) -> Any:
     for key in keys:
-        if key in record:
-            value = record[key]
-            if value is None:
-                continue
-            if isinstance(value, str) and not value.strip():
-                continue
-            return value
+        if key in record and record[key] not in (None, ""):
+            return record[key]
     return None
 
 
 def _pick_text(record: Mapping[str, Any], *keys: str) -> str:
     value = _pick_value(record, *keys)
-    if value is None:
-        return ""
-    text = str(value).strip()
-    if text == "-":
-        return ""
-    return text
+    return "" if value is None else str(value).strip()
 
 
 def _pick_int(record: Mapping[str, Any], *keys: str, default: int) -> int:
-    value = _pick_value(record, *keys)
-    return _to_int(value, default=default)
+    return _to_int(_pick_value(record, *keys), default=default)
 
 
 def _to_int(value: Any, *, default: int = 0) -> int:

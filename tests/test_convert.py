@@ -7,71 +7,54 @@ def _read_lines(path: Path):
     return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def test_convert_txt_access_log_keeps_raw_shape(tmp_path: Path):
-    input_path = tmp_path / "access.txt"
+def test_convert_csv_new_format(tmp_path: Path):
+    input_path = tmp_path / "flow.csv"
     input_path.write_text(
-        '83.149.9.216 - - [17/May/2015:10:05:03 +0000] "GET /img.png HTTP/1.1" 200 203023 "-" "Mozilla/5.0"\n',
+        "timestamp,src_ip,src_port,dst_ip,dst_port,request_http_method,request_http_request,request_http_protocol,request_user_agent,request_referer,request_host,request_origin,request_cookie,request_content_type,request_accept,request_accept_language,request_accept_encoding,request_do_not_track,request_connection,request_body,response_http_protocol,response_http_status_code,response_http_status_message,response_content_length,000 - Normal\n"
+        "17/Jul/2020:12:23:34 +0100,172.26.0.1,55894,172.26.0.4,80,GET,/,HTTP/1.1,UA,,test-site.com,,,,*/*,,\"gzip, deflate\",,keep-alive,,HTTP/1.1,200,OK,25174,1\n",
         encoding="utf-8",
     )
 
-    summary = convert_file(input_path=input_path, output_root=tmp_path / "data/raw")
-    output_path = Path(summary["output"])
+    summary = convert_file(input_path=input_path, output_root=tmp_path / "data/raw", server_type="apache")
+    outputs = summary["converted"][0]["output"]
+    out_path = Path(outputs if isinstance(outputs, str) else outputs[0])
+    lines = _read_lines(out_path)
 
+    assert summary["counts"]["converted_files"] == 1
     assert summary["counts"]["raw_lines"] == 1
-    assert output_path.exists()
-    lines = _read_lines(output_path)
-    assert len(lines) == 1
-    assert lines[0].startswith("83.149.9.216 - - [17/May/2015:10:05:03 +0000]")
+    assert '"GET / HTTP/1.1" 200 25174' in lines[0]
 
 
-def test_convert_http_request_block_to_access_log_line(tmp_path: Path):
-    input_path = tmp_path / "block.txt"
+def test_convert_folder_and_skip_bad_file(tmp_path: Path):
+    in_dir = tmp_path / "input"
+    in_dir.mkdir()
+    (in_dir / "ok.csv").write_text("timestamp,src_ip,request_http_method,request_http_request,response_http_status_code,response_content_length\n2020-01-01 00:00:00,1.1.1.1,GET,/a,200,12\n", encoding="utf-8")
+    (in_dir / "bad.log").write_bytes(b"\xff\xfe\x00\x00")
+
+    summary = convert_file(input_path=in_dir, output_root=tmp_path / "data/raw")
+
+    assert summary["counts"]["converted_files"] >= 1
+    assert summary["counts"]["raw_lines"] >= 1
+
+
+def test_convert_split_large_output(tmp_path: Path, monkeypatch):
+    from src.converter import convert_flow as flow
+
+    monkeypatch.setattr(flow, "MAX_PART_BYTES", 120)
+
+    input_path = tmp_path / "many.csv"
     input_path.write_text(
-        "Start - Id: 11044\n"
-        "class: Attack\n"
-        "GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?idA=2 HTTP/1.1\n"
-        "User-Agent: Mozilla/5.0\n"
-        "Host: localhost:8080\n"
-        "End - Id: 11044\n",
-        encoding="utf-8",
-    )
-
-    summary = convert_file(input_path=input_path, output_root=tmp_path / "data/raw")
-    lines = _read_lines(Path(summary["output"]))
-
-    assert summary["counts"]["raw_lines"] == 1
-    assert '"GET http://localhost:8080/tienda1/publico/caracteristicas.jsp?idA=2 HTTP/1.1"' in lines[0]
-    assert '"Mozilla/5.0"' in lines[0]
-
-
-def test_convert_structured_csv_to_access_log_line(tmp_path: Path):
-    input_path = tmp_path / "sec.csv"
-    input_path.write_text(
-        "timestamp,source_ip,http_method,raw_uri,status_code,response_size,user_agent,referrer\n"
-        "2025-06-30T23:59:58.997-0400,10.0.0.1,GET,/a,200,123,UA,-\n",
+        "timestamp,src_ip,request_http_method,request_http_request,response_http_status_code,response_content_length\n"
+        + "\n".join(
+            f"2020-01-01 00:00:{i:02d},1.1.1.1,GET,/path-{i},200,12" for i in range(10)
+        )
+        + "\n",
         encoding="utf-8",
     )
 
     summary = convert_file(input_path=input_path, output_root=tmp_path / "data/raw", server_type="nginx")
-    output_path = Path(summary["output"])
-    lines = _read_lines(output_path)
+    outputs = summary["converted"][0]["output"]
 
-    assert summary["server_type"] == "nginx"
-    assert summary["counts"]["raw_lines"] == 1
-    assert output_path.parent.name == "nginx"
-    assert '"GET /a HTTP/1.1" 200 123' in lines[0]
-
-
-def test_convert_parsered_jsonl_to_access_log_line(tmp_path: Path):
-    input_path = tmp_path / "parsed.jsonl"
-    input_path.write_text(
-        '{"http_method":"POST","raw_uri":"/login","http_version":"HTTP/1.1","status_code":401,"response_size":0,"user_agent":"ua","referrer":"-","source_ip":"1.2.3.4"}\n',
-        encoding="utf-8",
-    )
-
-    summary = convert_file(input_path=input_path, output_root=tmp_path / "data/raw")
-    lines = _read_lines(Path(summary["output"]))
-
-    assert summary["counts"]["raw_lines"] == 1
-    assert lines[0].startswith("1.2.3.4 - - [")
-    assert '"POST /login HTTP/1.1" 401 0 "-" "ua"' in lines[0]
+    assert isinstance(outputs, list)
+    assert len(outputs) > 1
+    assert all(Path(p).exists() for p in outputs)

@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -337,20 +338,89 @@ def run_pipeline(
         "continuation_merged_records": sum(1 for row in raw_line_records if row.get("was_continuation_merged")),
     }
 
+    report_dir = output_path / "report"
+    report_dir.mkdir(parents=True, exist_ok=True)
     report_text = ReportGenerator().generate(summary, alerts)
-    markdown_exporter.export(report_text, output_path / f"{prefix}_report.md")
+    markdown_exporter.export(report_text, report_dir / f"{prefix}_report.md")
 
-    run_summary_path = output_path / f"{prefix}_run_summary.json"
+    run_summary_path = report_dir / f"{prefix}_run_summary.json"
     run_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return summary
+
+
+def run_pipeline_batch(
+    *,
+    input_path: str | Path,
+    server_type: Optional[str],
+    output_dir: str | Path,
+    rules_path: str = DEFAULT_RULES_PATH,
+    stage: str = "all",
+) -> Dict:
+    path = Path(input_path)
+    if path.is_file():
+        return run_pipeline(
+            input_path=path,
+            server_type=server_type,
+            output_dir=output_dir,
+            rules_path=rules_path,
+            stage=stage,
+        )
+
+    if not path.is_dir():
+        raise ValueError(f"Input path is not a file or directory: {path}")
+
+    supported_suffixes = {".log", ".txt", ".csv", ".json", ".jsonl"}
+    candidates = [
+        item for item in sorted(path.rglob("*"))
+        if item.is_file() and item.suffix.lower() in supported_suffixes
+    ]
+
+    runs: List[Dict] = []
+    skipped: List[Dict] = []
+    total_counts: Dict[str, int] = {}
+    output_dir_path = Path(output_dir)
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    total_files = len(candidates)
+    print(f"[+] Batch mode: found {total_files} files", flush=True)
+
+    for index, item in enumerate(candidates, start=1):
+        print(f"[{index}/{total_files}] Processing: {item}", flush=True)
+        try:
+            summary = run_pipeline(
+                input_path=item,
+                server_type=server_type,
+                output_dir=output_dir_path,
+                rules_path=rules_path,
+                stage=stage,
+            )
+            runs.append(summary)
+            for key, value in summary.get("counts", {}).items():
+                total_counts[key] = total_counts.get(key, 0) + int(value)
+            print(f"[{index}/{total_files}] Done: {item.name}", flush=True)
+        except Exception as exc:
+            skipped.append({"input_path": str(item), "error": str(exc)})
+            print(f"[{index}/{total_files}] Skipped: {item.name} ({exc})", flush=True)
+
+    return {
+        "mode": "batch",
+        "input_path": str(path),
+        "output_dir": str(output_dir_path),
+        "stage": stage,
+        "counts": total_counts,
+        "processed_files": len(runs),
+        "skipped_files": len(skipped),
+        "runs": runs,
+        "skipped": skipped,
+    }
 
 
 def build_cli() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Web Server Log Parser + Rule-based Web Attack Detection (non-ML pipeline)"
     )
-    parser.add_argument("--input", required=True, help="Path to one access log file")
+    parser.add_argument("--input", required=True, help="Path to one input file or a folder of files")
     parser.add_argument(
         "--server-type",
         required=False,
@@ -367,7 +437,7 @@ def main() -> None:
     cli = build_cli()
     args = cli.parse_args()
 
-    summary = run_pipeline(
+    summary = run_pipeline_batch(
         input_path=args.input,
         server_type=args.server_type,
         output_dir=args.output_dir,
@@ -383,7 +453,17 @@ def main() -> None:
     print(f"[+] Alerts: {counts.get('alerts', 0)}")
     collector_info = summary.get("collector", {})
     print(f"[+] Decode fallback records: {collector_info.get('decode_error_records', 0)}")
+    if summary.get("mode") == "batch":
+        print(f"[+] Processed files: {summary.get('processed_files', 0)}")
+        print(f"[+] Skipped files: {summary.get('skipped_files', 0)}")
+        # Show only concise skip list (no stage result logs).
+        skipped = summary.get("skipped", [])
+        if skipped:
+            print("[+] Skipped details:")
+            for item in skipped:
+                print(f"    - {item.get('input_path')}: {item.get('error')}")
     print(f"[+] Output dir: {summary.get('output_dir')}")
+    sys.stdout.flush()
 
 
 if __name__ == "__main__":

@@ -37,8 +37,8 @@ def test_pipeline_cli_generates_expected_outputs(tmp_path: Path):
         "feature_results/apache_access_features.csv",
         "detector_results/apache_access_alerts.jsonl",
         "detector_results/apache_access_alerts.csv",
-        "apache_access_report.md",
-        "apache_access_run_summary.json",
+        "report/apache_access_report.md",
+        "report/apache_access_run_summary.json",
     ]
     for file_name in expected_files:
         assert (output_dir / file_name).exists(), file_name
@@ -66,9 +66,38 @@ def test_pipeline_cli_generates_expected_outputs(tmp_path: Path):
     assert all("physical_line_end" in row for row in raw_rows)
     assert [row["event_id"] for row in raw_rows] == [row["event_id"] for row in parsed]
 
-    summary = json.loads((output_dir / "apache_access_run_summary.json").read_text(encoding="utf-8"))
+    summary = json.loads((output_dir / "report/apache_access_run_summary.json").read_text(encoding="utf-8"))
     assert summary["counts"]["raw_lines"] == 2
     assert summary["counts"]["parsed_logs"] == 2
     assert "collector" in summary
     assert "decode_error_records" in summary["collector"]
     assert summary["server_type"] == "apache"
+
+
+def test_pipeline_cli_accepts_folder_input(tmp_path: Path):
+    input_dir = tmp_path / "inputs"
+    input_dir.mkdir()
+    (input_dir / "a.log").write_text(
+        '127.0.0.1 - - [10/Oct/2000:13:55:36 +0000] "GET /ok HTTP/1.1" 200 10 "-" "ua"\n',
+        encoding="utf-8",
+    )
+    (input_dir / "bad.log").write_text("not a valid access line\n", encoding="utf-8")
+
+    output_dir = tmp_path / "batch_outputs"
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "src.main",
+            "--input",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+            "--rules",
+            "src/rules/attack_patterns.yaml",
+        ],
+        check=True,
+    )
+
+    summary_files = list(output_dir.rglob("*_run_summary.json"))
+    assert summary_files, "Expected at least one run summary file in batch output"
