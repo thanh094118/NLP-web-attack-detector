@@ -27,10 +27,11 @@ cd data
 
 echo ""
 echo "Downloading dataset from Google Drive..."
-echo "Folder: SR-BH 2020 Dataset"
+echo "File: outputs.zip"
 echo ""
 
-FOLDER_ID="1CyGzbLDo3qDNyGOoOESy3cgebxyQKK4D"
+FILE_ID="1uya_Y9SfPZ0DNsrp0qcWB8KZGZx42xDn"
+OUTPUT_FILE="outputs.zip"
 
 download_with_gdown() {
     if ! command -v gdown &> /dev/null; then
@@ -38,8 +39,9 @@ download_with_gdown() {
         $PYTHON_BIN -m pip install gdown
     fi
     
-    echo "Downloading folder using gdown..."
-    gdown --folder "https://drive.google.com/drive/folders/${FOLDER_ID}" -O .
+    echo "Downloading file using gdown..."
+    gdown "https://drive.google.com/uc?id=${FILE_ID}" -O "${OUTPUT_FILE}" \
+    || gdown "https://drive.google.com/file/d/${FILE_ID}/view?usp=sharing" -O "${OUTPUT_FILE}"
 }
 
 download_with_python_gdown() {
@@ -47,9 +49,9 @@ download_with_python_gdown() {
 import gdown
 import os
 
-folder_id = '${FOLDER_ID}'
-url = f'https://drive.google.com/drive/folders/{folder_id}'
-gdown.download_folder(url, quiet=False, use_cookies=False)
+file_id = '${FILE_ID}'
+url = f'https://drive.google.com/uc?id={file_id}'
+gdown.download(url, '${OUTPUT_FILE}', quiet=False, fuzzy=True, use_cookies=False)
 " 2>/dev/null
 }
 
@@ -65,13 +67,22 @@ fi
 
 if [ $? -eq 0 ]; then
     echo ""
-    echo "Dataset downloaded successfully to ./data/"
+    echo "Dataset downloaded successfully to ./data/${OUTPUT_FILE}"
+    if [ -f "${OUTPUT_FILE}" ]; then
+        echo "Extracting ${OUTPUT_FILE}..."
+        unzip -o "${OUTPUT_FILE}" -d . >/dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            echo "Extracted successfully into ./data/"
+        else
+            echo "Warning: unzip failed. Please extract ./data/${OUTPUT_FILE} manually."
+        fi
+    fi
 else
     echo ""
     echo "Download failed. Trying alternative method..."
     echo "Please manually download from:"
-    echo "https://drive.google.com/drive/folders/${FOLDER_ID}"
-    echo "and place contents in ./data/ folder"
+    echo "https://drive.google.com/file/d/${FILE_ID}/view?usp=sharing"
+    echo "and place ${OUTPUT_FILE} in ./data/ folder"
 fi
 
 cd ..
