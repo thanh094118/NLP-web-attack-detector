@@ -144,22 +144,14 @@ def to_raw_line_records_with_metadata(
 
 
 def build_feature_row(record: Dict) -> Dict:
-    row = {
-        "line_number": record.get("line_number"),
-        "event_id": record.get("event_id"),
-        "parse_status": record.get("parse_status"),
-        "parse_error": record.get("parse_error"),
-        "error_message": record.get("error_message"),
-        "source_ip": record.get("source_ip"),
-        "http_method": record.get("http_method"),
-        "original_url": record.get("original_url"),
-        "uri": record.get("uri"),
-        "query_string": record.get("query_string"),
-        "normalized_request": record.get("normalized_request"),
-        "server_type": record.get("server_type"),
+    excluded_feature_columns = {
+        "feature_status_code",
+        "feature_response_size",
+        "feature_feature_schema_version",
     }
+    row = {}
     for key, value in record.items():
-        if key.startswith("feature_"):
+        if key.startswith("feature_") and key not in excluded_feature_columns:
             row[key] = value
     return row
 
@@ -248,6 +240,7 @@ def run_pipeline(
     jsonl_exporter = JSONLExporter()
     csv_exporter = CSVExporter(preferred_fieldnames=RECORD_PREFERRED_COLUMNS)
     alert_csv_exporter = CSVExporter(preferred_fieldnames=ALERT_PREFERRED_COLUMNS)
+    feature_csv_exporter = CSVExporter()
     markdown_exporter = MarkdownExporter()
 
     read_records = collector.read_records()
@@ -300,7 +293,7 @@ def run_pipeline(
             alerts.append(build_alert_record(record))
 
     if stage in ("all", "extract"):
-        csv_exporter.export(feature_rows, stage_file("extract", "features.csv"))
+        feature_csv_exporter.export(feature_rows, stage_file("extract", "features.csv"))
     if stage in ("all", "detect"):
         jsonl_exporter.export(alerts, stage_file("detect", "alerts.jsonl"))
         alert_csv_exporter.export(alerts, stage_file("detect", "alerts.csv"))
