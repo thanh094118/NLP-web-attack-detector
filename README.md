@@ -32,6 +32,7 @@ python -m src.main --input data/raw/apache/access.log
 With explicit rules file:
 
 ```bash
+python -m src.main --input data/raw/apache/traversal_access.log --rules src/rules/attack_patterns.yaml
 ```
 
 ## Required Arguments
@@ -40,7 +41,8 @@ With explicit rules file:
 - `--server-type` (optional): `apache`, `nginx`, or `iis` (if omitted, pipeline auto-detects)
 - `--output-dir` (optional): output directory for one run (default: `outputs`)
 - `--rules` (optional): YAML rule file path (default: `src/rules/attack_patterns.yaml`)
-- `--stage` (optional): `all` (default) or one stage: `collect`, `parser`, `normalize`, `preprocess`, `detect`, `extract`
+
+Pipeline always runs end-to-end (collector -> parser -> normalizer -> preprocessor -> detector -> feature -> report).
 
 ## Output Files
 

@@ -358,14 +358,8 @@ def test_pre_parser_converts_raw_nginx_record_to_ai_schema():
         "server_type": "nginx",
         "raw_line": '62.225.70.202 - - [19/May/2015:21:05:39 +0000] "GET /presentations/logstash-puppetconf-2012/images/nagios-sms2.png HTTP/1.0" 200 60656 "http://semicomplete.com/presentations/logstash-puppetconf-2012/" "Mozilla/5.0 (Windows NT 5.1; rv:24.0) Gecko/20100101 Firefox/24.0"',
         "parse_status": "raw",
-        "parse_error": False,
-        "error_message": None,
-        "encoding_used": "utf-8",
-        "decode_error": False,
-        "had_bom": False,
-        "was_continuation_merged": False,
-        "physical_line_start": 11,
-        "physical_line_end": 11,
+        "flags": [],
+        "physical_line_range": [11, 11],
     }
 
     parsed = AIPreParser().parse_record(raw_record)

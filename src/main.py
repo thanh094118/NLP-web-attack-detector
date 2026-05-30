@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -15,6 +16,7 @@ from src.normalizer.normalizer import Normalizer
 from src.parser.apache_parser import ApacheParser
 from src.parser.iis_parser import IISParser
 from src.parser.nginx_parser import NginxParser
+from src.parser.server_type_detector import detect_server_type
 from src.preprocessor.request_preprocessor import RequestPreprocessor
 from src.reporting.postprocessor import PostProcessor
 from src.reporting.report_generator import ReportGenerator
@@ -22,7 +24,6 @@ from src.scoring.risk_engine import RiskEngine
 
 
 DEFAULT_RULES_PATH = "src/rules/attack_patterns.yaml"
-STAGE_CHOICES = ("all", "collect", "parser", "normalize", "preprocess", "detect", "extract")
 
 RECORD_PREFERRED_COLUMNS = [
     "event_id",
@@ -106,8 +107,8 @@ def to_raw_line_records(lines: List[str], server_type: str, source_id: Optional[
             "server_type": server_type.lower(),
             "raw_line": line,
             "parse_status": "raw",
-            "parse_error": False,
-            "error_message": None,
+            "flags": [],
+            "physical_line_range": [idx, idx],
         })
     return records
 
@@ -131,14 +132,8 @@ def to_raw_line_records_with_metadata(
             "server_type": server_type.lower(),
             "raw_line": line,
             "parse_status": "raw",
-            "parse_error": False,
-            "error_message": None,
-            "encoding_used": item.get("encoding_used"),
-            "decode_error": bool(item.get("decode_error", False)),
-            "had_bom": bool(item.get("had_bom", False)),
-            "was_continuation_merged": bool(item.get("was_continuation_merged", False)),
-            "physical_line_start": item.get("physical_line_start"),
-            "physical_line_end": item.get("physical_line_end"),
+            "flags": list(item.get("flags", [])),
+            "physical_line_range": list(item.get("physical_line_range", [idx, idx])),
         })
     return records
 
@@ -189,28 +184,12 @@ def build_alert_record(record: Dict) -> Dict:
     }
 
 
-def detect_server_type(lines: List[str]) -> str:
-    non_empty = [line for line in lines if str(line).strip()]
-    if any(str(line).lstrip().startswith("#Fields:") for line in non_empty):
-        return "iis"
-    if any(str(line).lstrip().startswith("#Software:") for line in non_empty):
-        return "iis"
-
-    sample = non_empty[:200]
-    apache_ok = sum(1 for row in ApacheParser().parse_lines(sample) if row.get("parse_status") == "success")
-    nginx_ok = sum(1 for row in NginxParser().parse_lines(sample) if row.get("parse_status") == "success")
-    if nginx_ok > apache_ok:
-        return "nginx"
-    return "apache"
-
-
 def run_pipeline(
     *,
     input_path: str | Path,
     server_type: Optional[str],
     output_dir: str | Path,
     rules_path: str = DEFAULT_RULES_PATH,
-    stage: str = "all",
 ) -> Dict:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -253,24 +232,28 @@ def run_pipeline(
     prefix = f"{resolved_server_type}_{input_stem}"
     raw_line_records = to_raw_line_records_with_metadata(read_records, resolved_server_type, source_id=source_id)
     jsonl_exporter.export(raw_line_records, stage_file("collect", "raw_lines.jsonl"))
-    if stage == "collect":
-        return {"stage": stage, "output_dir": str(output_path), "counts": {"raw_lines": len(raw_line_records)}}
+    flag_counts = Counter(
+        flag
+        for row in raw_line_records
+        for flag in row.get("flags", [])
+    )
+    for flag in sorted(flag_counts):
+        count = int(flag_counts.get(flag, 0))
+        if count > 0:
+            print(
+                f"[collector][flag] {Path(input_path).name}: {flag}={count}",
+                flush=True,
+            )
 
     parsed_logs = list(parser.parse_lines(raw_lines))
     jsonl_exporter.export(parsed_logs, stage_file("parser", "parsed_logs.jsonl"))
-    if stage == "parser":
-        return {"stage": stage, "output_dir": str(output_path), "counts": {"raw_lines": len(raw_line_records), "parsed_logs": len(parsed_logs)}}
 
     normalized_logs = [normalizer.normalize(row) for row in parsed_logs]
     jsonl_exporter.export(normalized_logs, stage_file("normalize", "normalized_logs.jsonl"))
     csv_exporter.export(normalized_logs, stage_file("normalize", "normalized_logs.csv"))
-    if stage == "normalize":
-        return {"stage": stage, "output_dir": str(output_path), "counts": {"raw_lines": len(raw_line_records), "parsed_logs": len(parsed_logs), "normalized_logs": len(normalized_logs)}}
 
     preprocessed_requests = [preprocessor.preprocess(row) for row in normalized_logs]
     jsonl_exporter.export(preprocessed_requests, stage_file("preprocess", "preprocessed_requests.jsonl"))
-    if stage == "preprocess":
-        return {"stage": stage, "output_dir": str(output_path), "counts": {"raw_lines": len(raw_line_records), "parsed_logs": len(parsed_logs), "normalized_logs": len(normalized_logs), "preprocessed_requests": len(preprocessed_requests)}}
 
     scored_records: List[Dict] = []
     feature_rows: List[Dict] = []
@@ -292,25 +275,9 @@ def run_pipeline(
         if record.get("should_alert"):
             alerts.append(build_alert_record(record))
 
-    if stage in ("all", "extract"):
-        feature_csv_exporter.export(feature_rows, stage_file("extract", "features.csv"))
-    if stage in ("all", "detect"):
-        jsonl_exporter.export(alerts, stage_file("detect", "alerts.jsonl"))
-        alert_csv_exporter.export(alerts, stage_file("detect", "alerts.csv"))
-
-    if stage in ("detect", "extract"):
-        return {
-            "stage": stage,
-            "output_dir": str(output_path),
-            "counts": {
-                "raw_lines": len(raw_line_records),
-                "parsed_logs": len(parsed_logs),
-                "normalized_logs": len(normalized_logs),
-                "preprocessed_requests": len(preprocessed_requests),
-                "alerts": len(alerts),
-                "features": len(feature_rows),
-            },
-        }
+    feature_csv_exporter.export(feature_rows, stage_file("extract", "features.csv"))
+    jsonl_exporter.export(alerts, stage_file("detect", "alerts.jsonl"))
+    alert_csv_exporter.export(alerts, stage_file("detect", "alerts.csv"))
 
     postprocessor = PostProcessor()
     summary = postprocessor.build_summary(
@@ -326,9 +293,18 @@ def run_pipeline(
         alerts=alerts,
     )
     summary["collector"] = {
-        "decode_error_records": sum(1 for row in raw_line_records if row.get("decode_error")),
-        "had_bom_records": sum(1 for row in raw_line_records if row.get("had_bom")),
-        "continuation_merged_records": sum(1 for row in raw_line_records if row.get("was_continuation_merged")),
+        "decode_error_records": sum(
+            1 for row in raw_line_records
+            if "decode_fallback_latin1" in set(row.get("flags", []))
+        ),
+        "had_bom_records": sum(
+            1 for row in raw_line_records
+            if "had_utf8_bom" in set(row.get("flags", []))
+        ),
+        "continuation_merged_records": sum(
+            1 for row in raw_line_records
+            if "continuation_merged" in set(row.get("flags", []))
+        ),
     }
 
     report_dir = output_path / "report"
@@ -348,7 +324,6 @@ def run_pipeline_batch(
     server_type: Optional[str],
     output_dir: str | Path,
     rules_path: str = DEFAULT_RULES_PATH,
-    stage: str = "all",
 ) -> Dict:
     path = Path(input_path)
     if path.is_file():
@@ -357,7 +332,6 @@ def run_pipeline_batch(
             server_type=server_type,
             output_dir=output_dir,
             rules_path=rules_path,
-            stage=stage,
         )
 
     if not path.is_dir():
@@ -386,7 +360,6 @@ def run_pipeline_batch(
                 server_type=server_type,
                 output_dir=output_dir_path,
                 rules_path=rules_path,
-                stage=stage,
             )
             runs.append(summary)
             for key, value in summary.get("counts", {}).items():
@@ -400,7 +373,6 @@ def run_pipeline_batch(
         "mode": "batch",
         "input_path": str(path),
         "output_dir": str(output_dir_path),
-        "stage": stage,
         "counts": total_counts,
         "processed_files": len(runs),
         "skipped_files": len(skipped),
@@ -422,7 +394,6 @@ def build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", default="outputs", help="Directory for all generated outputs")
     parser.add_argument("--rules", default=DEFAULT_RULES_PATH, help="YAML rule file path")
-    parser.add_argument("--stage", default="all", choices=STAGE_CHOICES, help="Run one stage only or full pipeline")
     return parser
 
 
@@ -435,7 +406,6 @@ def main() -> None:
         server_type=args.server_type,
         output_dir=args.output_dir,
         rules_path=args.rules,
-        stage=args.stage,
     )
 
     counts = summary.get("counts", {})

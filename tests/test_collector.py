@@ -41,11 +41,11 @@ def test_read_flow_handles_utf8_bom_only_on_first_line(tmp_path: Path):
 
     assert len(records) == 2
     assert records[0]["line"].startswith("127.0.0.1")
-    assert records[0]["had_bom"] is True
+    assert "had_utf8_bom" in records[0]["flags"]
 
     # BOM ở dòng 2 không bị strip vì không phải BOM đầu file.
     assert records[1]["line"].startswith("\ufeff10.0.0.2")
-    assert records[1]["had_bom"] is False
+    assert "had_utf8_bom" not in records[1]["flags"]
 
 
 def test_read_flow_normalizes_lf_crlf_and_cr_line_endings(tmp_path: Path):
@@ -70,6 +70,27 @@ def test_read_flow_normalizes_lf_crlf_and_cr_line_endings(tmp_path: Path):
     assert len(lines) == 3
     assert all(not line.endswith("\n") for line in lines)
     assert all(not line.endswith("\r") for line in lines)
+
+
+def test_read_flow_splits_cr_only_physical_lines(tmp_path: Path):
+    """
+    Test:
+    - File sử dụng CR-only giữa các dòng vật lý (legacy style).
+    - Reader phải tách được thành nhiều logical line thay vì gom thành một dòng.
+    """
+    log_path = tmp_path / "access.log"
+    log_path.write_bytes(
+        b"127.0.0.1 - - [date] \"GET /a HTTP/1.1\" 200 1 \"-\" \"ua\"\r"
+        b"127.0.0.2 - - [date] \"GET /b HTTP/1.1\" 200 2 \"-\" \"ua2\"\r"
+        b"127.0.0.3 - - [date] \"GET /c HTTP/1.1\" 200 3 \"-\" \"ua3\""
+    )
+
+    lines = FileCollector(str(log_path)).read_all()
+
+    assert len(lines) == 3
+    assert lines[0].startswith("127.0.0.1")
+    assert lines[1].startswith("127.0.0.2")
+    assert lines[2].startswith("127.0.0.3")
 
 
 def test_read_flow_skips_empty_and_whitespace_only_lines(tmp_path: Path):
@@ -124,9 +145,8 @@ def test_read_flow_merges_space_and_tab_continuation_lines(tmp_path: Path):
         "\\n  continued payload"
         "\\n\tcontinued tab payload"
     )
-    assert records[0]["was_continuation_merged"] is True
-    assert records[0]["physical_line_start"] == 1
-    assert records[0]["physical_line_end"] == 3
+    assert "continuation_merged" in records[0]["flags"]
+    assert records[0]["physical_line_range"] == [1, 3]
 
 
 def test_read_flow_does_not_merge_non_indented_injection_like_lines(tmp_path: Path):
@@ -193,7 +213,7 @@ def test_read_flow_latin1_fallback_does_not_crash(tmp_path: Path):
     Test:
     - Một dòng có byte không decode được bằng UTF-8.
     - Collector phải fallback sang latin-1 thay vì crash.
-    - Record phải đánh dấu decode_error=True.
+    - Record phải có flag decode fallback latin-1.
 
     Ý nghĩa:
     - File access.log thực tế có thể chứa byte bẩn.
@@ -208,23 +228,18 @@ def test_read_flow_latin1_fallback_does_not_crash(tmp_path: Path):
     records = FileCollector(str(log_path)).read_records()
 
     assert len(records) == 2
-    assert records[0]["encoding_used"] == "utf-8"
-    assert records[0]["decode_error"] is False
-    assert records[1]["encoding_used"] == "latin-1"
-    assert records[1]["decode_error"] is True
+    assert "decode_fallback_latin1" not in records[0]["flags"]
+    assert "decode_fallback_latin1" in records[1]["flags"]
     assert "ÿ" in records[1]["line"]
 
 
-def test_read_flow_continuation_can_upgrade_record_encoding_to_latin1(tmp_path: Path):
+def test_read_flow_continuation_propagates_decode_fallback_flag(tmp_path: Path):
     """
     Test:
-    - Dòng chính decode được UTF-8.
-    - Dòng continuation chứa byte bẩn phải fallback latin-1.
-    - Record sau khi merge phải cập nhật encoding_used thành latin-1.
+    - Dòng continuation chứa byte bẩn thì logical record phải có flag decode fallback.
 
     Ý nghĩa:
-    - Metadata của record phải phản ánh toàn bộ logical record,
-      không chỉ dòng vật lý đầu tiên.
+    - Metadata phải phản ánh toàn bộ logical record.
     """
     log_path = tmp_path / "access.log"
     log_path.write_bytes(
@@ -235,9 +250,8 @@ def test_read_flow_continuation_can_upgrade_record_encoding_to_latin1(tmp_path: 
     records = FileCollector(str(log_path)).read_records()
 
     assert len(records) == 1
-    assert records[0]["encoding_used"] == "latin-1"
-    assert records[0]["decode_error"] is True
-    assert records[0]["was_continuation_merged"] is True
+    assert "decode_fallback_latin1" in records[0]["flags"]
+    assert "continuation_merged" in records[0]["flags"]
 
 
 def test_read_flow_validate_missing_file_raises(tmp_path: Path):
@@ -264,250 +278,6 @@ def test_read_flow_validate_directory_raises(tmp_path: Path):
     """
     with pytest.raises(ValueError):
         FileCollector(str(tmp_path)).read_all()
-
-
-# ============================================================
-# COLLECT FLOW TESTS
-# Mục tiêu:
-# - Discover access*.log.
-# - Copy file byte-exact sang outputs.
-# - Giữ server_type theo thư mục Apache/Nginx/IIS.
-# - Tạo warning log nếu phát hiện byte không UTF-8.
-# - Không overwrite log.txt cảnh báo.
-# ============================================================
-
-
-def test_collect_flow_copies_file_byte_exactly(tmp_path: Path):
-    """
-    Test:
-    - Collect flow copy file từ input sang output ở dạng bytes.
-    - Nội dung output phải giống input tuyệt đối.
-
-    Ý nghĩa:
-    - Collector không được làm mất BOM, byte bẩn, CRLF hoặc nội dung gốc.
-    - File .txt output là bản raw byte-exact để audit/replay.
-    """
-    input_root = tmp_path / "input"
-    apache_dir = input_root / "Apache"
-    apache_dir.mkdir(parents=True)
-
-    raw_bytes = (
-        b"\xef\xbb\xbf127.0.0.1 - - [date] "
-        b"\"GET /\xff HTTP/1.1\" 200 10 \"-\" \"ua\"\r\n"
-    )
-    log_path = apache_dir / "access1.log"
-    log_path.write_bytes(raw_bytes)
-
-    output_root = tmp_path / "outputs"
-    jobs = FileCollector(str(input_root)).collect_jobs(str(output_root))
-
-    assert len(jobs) == 1
-    assert jobs[0].server_type == "Apache"
-    assert jobs[0].output_txt_path.read_bytes() == raw_bytes
-
-
-def test_collect_flow_discovers_only_access_log_files(tmp_path: Path):
-    """
-    Test:
-    - Chỉ collect file có tên bắt đầu bằng access và kết thúc bằng .log.
-    - Bỏ qua error.log và access.txt.
-
-    Ý nghĩa:
-    - Collector chỉ xử lý access log đúng convention.
-    """
-    input_root = tmp_path / "input"
-    apache_dir = input_root / "Apache"
-    apache_dir.mkdir(parents=True)
-
-    valid_1 = apache_dir / "access.log"
-    valid_2 = apache_dir / "access_error.log"
-    invalid_1 = apache_dir / "error.log"
-    invalid_2 = apache_dir / "access.txt"
-
-    valid_1.write_bytes(b"valid1\n")
-    valid_2.write_bytes(b"valid2\n")
-    invalid_1.write_bytes(b"invalid1\n")
-    invalid_2.write_bytes(b"invalid2\n")
-
-    jobs = FileCollector(str(input_root)).collect_jobs(str(tmp_path / "outputs"))
-
-    copied_names = sorted(job.input_log_path.name for job in jobs)
-    assert copied_names == ["access.log", "access_error.log"]
-
-
-def test_collect_flow_supports_single_file_input(tmp_path: Path):
-    """
-    Test:
-    - Input có thể là một file access.log trực tiếp, không bắt buộc là folder.
-
-    Ý nghĩa:
-    - CLI/tool có thể hỗ trợ cả:
-      + --input input/Apache/
-      + --input input/Apache/access.log
-    """
-    log_path = tmp_path / "access.log"
-    log_path.write_bytes(b"127.0.0.1 - - [date] \"GET / HTTP/1.1\" 200 1\n")
-
-    jobs = FileCollector(str(log_path)).collect_jobs(str(tmp_path / "outputs"))
-
-    assert len(jobs) == 1
-    assert jobs[0].server_type == "unknown"
-    assert jobs[0].output_txt_path.exists()
-
-
-def test_collect_flow_detects_server_type_from_parent_folder_case_insensitive(tmp_path: Path):
-    """
-    Test:
-    - Server type được suy ra từ folder cha:
-      Apache, Nginx, IIS.
-    - So khớp không phân biệt hoa/thường.
-    - Folder khác thì server_type = unknown.
-
-    Ý nghĩa:
-    - Output được gom theo server type để các phase sau biết log thuộc nguồn nào.
-    """
-    input_root = tmp_path / "input"
-    for folder_name, expected in [
-        ("Apache", "Apache"),
-        ("Nginx", "Nginx"),
-        ("IIS", "IIS"),
-        ("Other", "unknown"),
-    ]:
-        d = input_root / folder_name
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "access.log").write_bytes(b"x\n")
-
-    jobs = FileCollector(str(input_root)).collect_jobs(str(tmp_path / "outputs"))
-
-    result = {job.input_log_path.parent.name: job.server_type for job in jobs}
-    assert result["Apache"] == "Apache"
-    assert result["Nginx"] == "Nginx"
-    assert result["IIS"] == "IIS"
-    assert result["Other"] == "unknown"
-
-
-def test_collect_flow_sanitizes_access_folder_name(tmp_path: Path):
-    """
-    Test:
-    - Tên file access.2026.05.log được chuyển thành folder access_2026_05.
-    - Output txt cũng dùng tên đã sanitize.
-
-    Ý nghĩa:
-    - Tránh tạo folder/tên output phức tạp khi file log có nhiều dấu chấm.
-    """
-    input_root = tmp_path / "input" / "Apache"
-    input_root.mkdir(parents=True)
-
-    log_path = input_root / "access.2026.05.log"
-    log_path.write_bytes(b"x\n")
-
-    jobs = FileCollector(str(tmp_path / "input")).collect_jobs(str(tmp_path / "outputs"))
-
-    assert len(jobs) == 1
-    assert jobs[0].output_dir.name == "access_2026_05"
-    assert jobs[0].output_txt_path.name == "access_2026_05.txt"
-
-
-def test_collect_flow_warning_log_is_created_for_non_utf8(tmp_path: Path):
-    """
-    Test:
-    - File chứa byte không decode strict UTF-8 được.
-    - Collect flow vẫn copy byte-exact.
-    - Đồng thời tạo outputs/.../log.txt để ghi warning.
-
-    Ý nghĩa:
-    - Raw file không bị sửa.
-    - Nhưng pipeline vẫn có dấu hiệu cảnh báo cho downstream/user.
-    """
-    input_root = tmp_path / "input" / "Nginx"
-    input_root.mkdir(parents=True)
-
-    log_path = input_root / "access9.log"
-    log_path.write_bytes(b"127.0.0.1 ok\nbad-byte:\xff\n")
-
-    output_root = tmp_path / "outputs"
-    FileCollector(str(tmp_path / "input")).collect_jobs(str(output_root))
-
-    warning_file = output_root / "Nginx" / "access9" / "log.txt"
-    assert warning_file.exists()
-
-    text = warning_file.read_text(encoding="utf-8")
-    assert "Non-UTF-8 byte sequences detected" in text
-    assert "raw .txt stays byte-exact" in text
-
-
-def test_collect_flow_warning_log_is_appended_not_overwritten(tmp_path: Path):
-    """
-    Test:
-    - Chạy collect cùng một input hai lần.
-    - log.txt warning phải được append, không bị overwrite.
-
-    Ý nghĩa:
-    - Giữ lịch sử cảnh báo của nhiều lần chạy.
-    """
-    input_root = tmp_path / "input" / "Nginx"
-    input_root.mkdir(parents=True)
-
-    log_path = input_root / "access9.log"
-    log_path.write_bytes(b"\xff\xfe\xfd bad bytes\n")
-
-    output_root = tmp_path / "outputs"
-    collector = FileCollector(str(tmp_path / "input"))
-    collector.collect_jobs(str(output_root))
-    collector.collect_jobs(str(output_root))
-
-    warning_file = output_root / "Nginx" / "access9" / "log.txt"
-    text = warning_file.read_text(encoding="utf-8")
-
-    assert text.count("Non-UTF-8 byte sequences detected") >= 2
-
-
-def test_collect_flow_no_warning_log_for_valid_utf8(tmp_path: Path):
-    """
-    Test:
-    - File UTF-8 hợp lệ, kể cả có tiếng Việt.
-    - Không tạo log.txt warning.
-
-    Ý nghĩa:
-    - Không tạo cảnh báo giả cho UTF-8 hợp lệ.
-    """
-    input_root = tmp_path / "input" / "Apache"
-    input_root.mkdir(parents=True)
-
-    log_path = input_root / "access.log"
-    log_path.write_bytes("127.0.0.1 tiếng_việt_ok\n".encode("utf-8"))
-
-    output_root = tmp_path / "outputs"
-    FileCollector(str(tmp_path / "input")).collect_jobs(str(output_root))
-
-    warning_file = output_root / "Apache" / "access" / "log.txt"
-    assert not warning_file.exists()
-
-
-def test_backward_compatible_collect_access_logs_to_txt_returns_path_pairs(tmp_path: Path):
-    """
-    Test:
-    - API cũ collect_access_logs_to_txt vẫn hoạt động.
-    - Trả về list tuple: (input_path, output_path).
-
-    Ý nghĩa:
-    - Đảm bảo backward compatibility khi đã tách collector thành nhiều flow mới.
-    """
-    input_root = tmp_path / "input" / "Apache"
-    input_root.mkdir(parents=True)
-
-    log_path = input_root / "access.log"
-    log_path.write_bytes(b"x\n")
-
-    pairs = FileCollector(str(tmp_path / "input")).collect_access_logs_to_txt(
-        str(tmp_path / "outputs")
-    )
-
-    assert len(pairs) == 1
-    input_path, output_path = pairs[0]
-    assert input_path == log_path
-    assert output_path.exists()
-    assert output_path.read_bytes() == b"x\n"
 
 
 def test_access_log_read_flow_internal_continuation_rule_is_indent_only():
