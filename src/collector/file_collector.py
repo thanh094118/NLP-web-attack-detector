@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Dict, Iterator, List
 
 from src.collector.read_flow import AccessLogReadFlow
-
+  
 
 class FileCollector:
     """
