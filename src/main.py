@@ -5,7 +5,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional
-
+  
 from src.collector.file_collector import FileCollector
 from src.detection.rule_detector import RuleDetector
 from src.exporters.csv_exporter import CSVExporter
