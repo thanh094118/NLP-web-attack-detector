@@ -1,6 +1,6 @@
 # Rule-based web attack patterns.
 # Generated safe YAML.
-
+  
 sqli:
   - id: sqli_boolean_or
     description: Boolean-based SQL injection using OR/AND tautology
