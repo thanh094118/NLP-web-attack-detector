@@ -1,6 +1,6 @@
 from src.scoring.risk_engine import RiskEngine
 
-
+  
 def test_risk_engine_elevates_score_from_features():
     engine = RiskEngine()
     record = {
