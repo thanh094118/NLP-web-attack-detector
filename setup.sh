@@ -11,7 +11,7 @@ else
     echo "Python not found. Please install Python 3.11+ first."
     exit 1
 fi
-
+  
 PYTHON_VERSION=$($PYTHON_BIN -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 PYTHON_MAJOR=$($PYTHON_BIN -c "import sys; print(sys.version_info.major)")
 PYTHON_MINOR=$($PYTHON_BIN -c "import sys; print(sys.version_info.minor)")
