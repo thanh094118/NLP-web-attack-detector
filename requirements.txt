@@ -5,8 +5,6 @@ gdown
 
 # Test runner
 pytest
-
-# Optional/isolated AI test pipeline dependencies (test_pipeline/)
 joblib
 numpy
 pandas
